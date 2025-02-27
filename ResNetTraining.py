@@ -1,60 +1,68 @@
-from torchvision import transforms
-from transformers import ResNetForImageClassification
-from transformers import AutoConfig, AutoModel
+from torch.utils.data import DataLoader
+from transformers import ResNetForImageClassification, AutoFeatureExtractor
+import torch
+from tqdm import tqdm
+
 from datasets import load_dataset
 
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import torch.optim as optim
+class CustomDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, transform):
+        self.dataset = dataset
+        self.transform = transform
+        self.label_map = {"cat":0, "dog":1}
 
-from data.CustomData import CustomDataset
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        image = self.dataset[index]["image"]
+        label = self.dataset[index]["labels"]
+        image = image.convert('RGB') if hasattr(image, 'convert') else image
+        image = self.transform(image, return_tensors="pt")
+        if len(image['pixel_values'].shape) > 3:
+            image['pixel_values'] = image['pixel_values'].squeeze(0)
+            #print("squeezing")
+        return image, label
 
 
-# Step 1: Setting up the dataset using the cats-dogs dataset from Microsoft using HuggingFace API
+# Instantiating the Model
+model_name = "microsoft/resnet-50"
+model = ResNetForImageClassification.from_pretrained(model_name)
+feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
 
+# Preparing the datasets
+raw_data = load_dataset("microsoft/cats_vs_dogs")
+train_dataset = CustomDataset(raw_data["train"], feature_extractor)
+train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
-transform = transforms.Compose([
-    transforms.Grayscale(num_output_channels=3),
-    transforms.Resize((224,224)), 
-    transforms.ToTensor(), 
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+model.classifier[-1] = torch.nn.Linear(model.classifier[-1].in_features, 2)
 
-## Step 1.1: defining Custom Dataset
-train_data = load_dataset("microsoft/cats_vs_dogs")
-train_dataset = CustomDataset(dataset=train_data["train"], transform=transform)
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-
-## Preparing ResNet architecture and training
-model = ResNetForImageClassification.from_pretrained("microsoft/resnet-50")
-model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, 2)
-model.config.num_labels = 2
-
-device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+device = torch.device("cuda")
 model.to(device)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.AdamW(model.classifier.parameters(), lr=1e-3)  # Train only classifier
 
-num_epochs = 5
-for epoch in range(num_epochs):
+# Define the loss function and optimizer
+criterion = torch.nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.classifier.parameters(), lr=10e-5)
+
+#for epoch in range(1):
+#    for (image, label) in train_dataloader:
+#        print(type(image), type(label))
+
+epochs = 20
+for epoch in range(epochs):
     model.train()
-    total_loss = 0
+    total_loss = 0.0
+    for (image, label) in tqdm(train_dataloader, total=len(train_dataloader)):
+        image = image.to(device)
+        label = label.to(device)
 
-    for images, labels in train_loader:
-        images, labels = images.to(device), labels.to(device)
-
-        optimizer.zero_grad()
-        outputs = model(images).logits  # Get logits from model
-        loss = criterion(outputs, labels)  # Compute loss
+        model.zero_grad()
+        pred = model(**image)
+        loss = criterion(pred.logits, label)
         loss.backward()
         optimizer.step()
-
         total_loss += loss.item()
 
-    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss/len(train_loader):.4f}")
-
-print("Fine-tuning complete!")
-
-model.save_pretrained("fine_tuned_resnet")
+    print(f"Epoch: {epoch} total_loss: {total_loss}")
+print("Finished Fine Tuning!!")

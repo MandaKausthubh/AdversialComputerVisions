@@ -12,5 +12,5 @@ class CustomDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         image = self.dataset[index]["image"]
         label = self.dataset[index]["labels"]
-        image = self.transform(image)
+        image = self.transform(image, return_tensors="pt")
         return image, label
